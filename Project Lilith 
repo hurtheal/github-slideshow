@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+# Project Lilith - Security Analysis Assistant
+# An educational tool for network analysis and security testing
+
+import argparse
+import os
+import sys
+import time
+import re
+import hashlib
+import base64
+import json
+import socket
+import ipaddress
+import requests
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Union
+
+try:
+    import colorama
+    from colorama import Fore, Style
+    colorama.init(autoreset=True)
+    HAS_COLOR = True
+except ImportError:
+    HAS_COLOR = False
+    class DummyFore:
+        RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = ""
+    class DummyStyle:
+        BRIGHT = RESET_ALL = ""
+    Fore = DummyFore()
+    Style = DummyStyle()
+
+VERSION = "1.0.0"
+BANNER = f"""
+{Fore.MAGENTA}╦  ╦╦  ╦╔╦╗╦ ╦{Fore.RESET}
+{Fore.MAGENTA}║  ║║  ║ ║ ╠═╣{Fore.RESET}
+{Fore.MAGENTA}╩═╝╩╩═╝╩ ╩ ╩ ╩{Fore.RESET}
+{Fore.CYAN}Security Analysis Assistant v{VERSION}{Fore.RESET}
+{Fore.YELLOW}For educational purposes only{Fore.RESET}
+"""
+
+class LilithCore:
+    """Core functionality for the Lilith assistant"""
+    
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+        self.history = []
+        self.log_path = Path.home() / ".lilith" / "logs"
+        self.log_path.mkdir(parents=True, exist_ok=True)
+        
+    def log(self, message: str, level: str = "INFO"):
+        """Log a message with timestamp"""
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] [{level}] {message}"
+        self.history.append(log_entry)
+        
+        if self.verbose:
+            prefix = {
+                "INFO": f"{Fore.BLUE}[INFO]",
+                "WARNING": f"{Fore.YELLOW}[WARNING]",
+                "ERROR": f"{Fore.RED}[ERROR]",
+                "SUCCESS": f"{Fore.GREEN}[SUCCESS]"
+            }.get(level, f"[{level}]")
+            print(f"{prefix} {message}{Style.RESET_ALL}")
+            
+        # Write to log file
+        with open(self.log_path / "lilith.log", "a") as f:
+            f.write(log_entry + "\n")
+    
+    def decode_base64(self, encoded_text: str) -> str:
+        """Decode base64 encoded text"""
+        try:
+            decoded_bytes = base64.b64decode(encoded_text)
+            return decoded_bytes.decode('utf-8')
+        except Exception as e:
+            self.log(f"Failed to decode base64: {e}", "ERROR")
+            return ""
+    
+    def encode_base64(self, text: str) -> str:
+        """Encode text to base64"""
+        try:
+            encoded_bytes = base64.b64encode(text.encode('utf-8'))
+            return encoded_bytes.decode('utf-8')
+        except Exception as e:
+            self.log(f"Failed to encode to base64: {e}", "ERROR")
+            return ""
+            
+    def hash_string(self, text: str, algorithm: str = "sha256") -> str:
+        """Generate hash of a string using specified algorithm"""
+        try:
+            if algorithm.lower() == "md5":
+                return hashlib.md5(text.encode()).hexdigest()
+            elif algorithm.lower() == "sha1":
+                return hashlib.sha1(text.encode()).hexdigest()
+            elif algorithm.lower() == "sha256":
+                return hashlib.sha256(text.encode()).hexdigest()
+            elif algorithm.lower() == "sha512":
+                return hashlib.sha512(text.encode()).hexdigest()
+            else:
+                self.log(f"Unsupported hash algorithm: {algorithm}", "ERROR")
+                return ""
+        except Exception as e:
+            self.log(f"Hash computation failed: {e}", "ERROR")
+            return ""
+
+
+class NetworkAnalyzer:
+    """Network analysis capabilities"""
+    
+    def __init__(self, core: LilithCore):
+        self.core = core
+    
+    def scan_port(self, host: str, port: int, timeout: float = 1.0) -> bool:
+        """Check if a specific port is open on target host"""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                result = s.connect_ex((host, port))
+                is_open = (result == 0)
+                status = "open" if is_open else "closed"
+                self.core.log(f"Port {port} on {host} is {status}", 
+                             "INFO" if not is_open else "SUCCESS")
+                return is_open
+        except socket.gaierror:
+            self.core.log(f"Hostname {host} could not be resolved", "ERROR")
+            return False
+        except Exception as e:
+            self.core.log(f"Error scanning port {port} on {host}: {e}", "ERROR")
+            return False
+    
+    def scan_common_ports(self, host: str, timeout: float = 1.0) -> Dict[int, bool]:
+        """Scan commonly used ports on target host"""
+        common_ports = [21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 3306, 3389, 5900, 8080]
+        self.core.log(f"Scanning common ports on {host}", "INFO")
+        
+        results = {}
+        for port in common_ports:
+            results[port] = self.scan_port(host, port, timeout)
+            
+        return results
+    
+    def validate_ip(self, ip: str) -> bool:
+        """Validate if string is a valid IP address"""
+        try:
+            ipaddress.ip_address(ip)
+            return True
+        except ValueError:
+            return False
+
+
+class PasswordTools:
+    """Password analysis and utilities"""
+    
+    def __init__(self, core: LilithCore):
+        self.core = core
+        self.common_passwords_file = Path(__file__).parent / "data" / "common_passwords.txt"
+        self._load_common_passwords()
+        
+    def _load_common_passwords(self):
+        """Load list of common passwords for educational purposes"""
+        self.common_passwords = []
+        try:
+            if self.common_passwords_file.exists():
+                with open(self.common_passwords_file, "r") as f:
+                    self.common_passwords = [line.strip() for line in f if line.strip()]
+                self.core.log(f"Loaded {len(self.common_passwords)} common passwords", "INFO")
+            else:
+                self.core.log("Common passwords file not found", "WARNING")
+                # Include a small default list
+                self.common_passwords = [
+                    "password", "123456", "qwerty", "admin", "welcome",
+                    "password123", "abc123", "letmein", "monkey", "1234567890"
+                ]
+        except Exception as e:
+            self.core.log(f"Error loading common passwords: {e}", "ERROR")
+    
+    def analyze_password_strength(self, password: str) -> Dict[str, Any]:
+        """Analyze password strength based on various factors"""
+        # This is for educational purposes to understand what makes a password strong
+        analysis = {
+            "length": len(password),
+            "has_uppercase": bool(re.search(r'[A-Z]', password)),
+            "has_lowercase": bool(re.search(r'[a-z]', password)),
+            "has_digits": bool(re.search(r'[0-9]', password)),
+            "has_special": bool(re.search(r'[^A-Za-z0-9]', password)),
+            "is_common": password in self.common_passwords,
+            "strength": "weak"
+        }
+        
+        # Calculate score
+        score = 0
+        if analysis["length"] >= 12:
+            score += 3
+        elif analysis["length"] >= 8:
+            score += 2
+        elif analysis["length"] >= 6:
+            score += 1
+            
+        if analysis["has_uppercase"]:
+            score += 1
+        if analysis["has_lowercase"]:
+            score += 1
+        if analysis["has_digits"]:
+            score += 1
+        if analysis["has_special"]:
+            score += 1
+        if not analysis["is_common"]:
+            score += 2
+            
+        # Determine strength rating
+        if score >= 7:
+            analysis["strength"] = "strong"
+        elif score >= 5:
+            analysis["strength"] = "moderate"
+        else:
+            analysis["strength"] = "weak"
+            
+        return analysis
+    
+    def generate_secure_password(self, length: int = 16, 
+                                include_upper: bool = True,
+                                include_lower: bool = True,
+                                include_digits: bool = True,
+                                include_special: bool = True) -> str:
+        """Generate a secure random password"""
+        import random
+        import string
+        
+        if length < 8:
+            self.core.log("Password length should be at least 8 characters", "WARNING")
+            length = max(8, length)
+        
+        char_sets = []
+        if include_upper:
+            char_sets.append(string.ascii_uppercase)
+        if include_lower:
+            char_sets.append(string.ascii_lowercase)
+        if include_digits:
+            char_sets.append(string.digits)
+        if include_special:
+            char_sets.append("!@#$%^&*()-_=+[]{}|;:,.<>?")
+            
+        if not char_sets:
+            self.core.log("No character sets selected, using defaults", "WARNING")
+            char_sets = [string.ascii_lowercase, string.digits]
+            
+        # Ensure at least one character from each set
+        password = []
+        for char_set in char_sets:
+            password.append(random.choice(char_set))
+            
+        # Fill the rest randomly
+        all_chars = ''.join(char_sets)
+        password.extend(random.choices(all_chars, k=length-len(password)))
+        
+        # Shuffle the password characters
+        random.shuffle(password)
+        
+        return ''.join(password)
+
+
+class CodeAnalyzer:
+    """Tools for code analysis and security scanning"""
+    
+    def __init__(self, core: LilithCore):
+        self.core = core
+        
+        # Common security issue patterns for educational detection
+        self.security_patterns = {
+            "python": [
+                (r"os\.system\(|subprocess\.call\(|exec\(|eval\(", 
+                 "Command injection vulnerability potential"),
+                (r"__import__\(['\"]os['\"]", 
+                 "Dynamic import of os module - potential security risk"),
+                (r"pickle\.loads?\(|yaml\.load\((?!.*Loader=yaml\.SafeLoader)",
+                 "Insecure deserialization - use pickle.loads with caution"),
+                (r"@app\.route\([^,)]*\)(?!.*methods=|\)$)", 
+                 "Flask route without methods specification"),
+                (r"request\.form\[\s*['\"][^'\"]+['\"]?\s*\](?!.*strip\(\))", 
+                 "User input used without sanitization"),
+                (r"cursor\.execute\(['\"][^'\"]*%s[^'\"]*['\"]\s*%\s*", 
+                 "Potential SQL injection - use parameterized queries"),
+                (r"\.\.\/|\.\.\\\|\.\.$", 
+                 "Directory traversal pattern detected"),
+            ],
+            "javascript": [
+                (r"eval\(|setTimeout\(\s*['\"][^'\"]+", 
+                 "Possible code injection - use with caution"),
+                (r"document\.write\(|\.innerHTML\s*=(?!\s*['\"]<)", 
+                 "Dynamic HTML - potential XSS risk"),
+                (r"localStorage\.|sessionStorage\.|cookies", 
+                 "Client storage usage - review security implications"),
+                (r"new\s+Function\(", 
+                 "Dynamic function creation - potential security risk"),
+                (r"\.innerText\s*=\s*location\.hash", 
+                 "Using location.hash to set content - XSS risk"),
+            ],
+            "php": [
+                (r"eval\(|system\(|exec\(|shell_exec\(|passthru\(", 
+                 "Code/command execution function - security risk"),
+                (r"\$_GET\[|\$_POST\[|\$_REQUEST\[|\$_COOKIE\[(?!.*htmlspecialchars)", 
+                 "User input without sanitization"),
+                (r"include\s*\(|\include_once\s*\(|require\s*\(|require_once\s*\((?!.*__DIR__)", 
+                 "Include/require without __DIR__ - path security concern"),
+                (r"mysql_query\(", 
+                 "Deprecated mysql_query - use mysqli or PDO"),
+                (r"echo\s+\$[^;]+;(?!.*htmlentities)", 
+                 "Output without HTML encoding - XSS risk"),
+            ],
+        }
+        
+    def analyze_code(self, code: str, language: str) -> List[Dict[str, Any]]:
+        """Analyze code for potential security issues"""
+        language = language.lower()
+        if language not in self.security_patterns:
+            self.core.log(f"Unsupported language for analysis: {language}", "WARNING")
+            return []
+            
+        findings = []
+        for pattern, description in self.security_patterns[language]:
+            matches = re.finditer(pattern, code)
+            for match in matches:
+                # Get context by extracting the line
+                line_start = code[:match.start()].rfind('\n') + 1
+                line_end = code.find('\n', match.end())
+                if line_end == -1:
+                    line_end = len(code)
+                    
+                line_number = code[:match.start()].count('\n') + 1
+                context = code[line_start:line_end].strip()
+                
+                findings.append({
+                    "line": line_number,
+                    "pattern": pattern,
+                    "description": description,
+                    "context": context,
+                    "start": match.start(),
+                    "end": match.end()
+                })
+                
+        return findings
+    
+    def suggest_fixes(self, findings: List[Dict[str, Any]], language: str) -> Dict[int, str]:
+        """Suggest potential fixes for identified issues"""
+        suggested_fixes = {}
+        
+        for finding in findings:
+            line = finding["line"]
+            context = finding["context"]
+            description = finding["description"]
+            
+            # Generate suggestions based on the type of issue
+            suggestion = "Review this code carefully for security implications."
+            
+            if "SQL injection" in description:
+                if language == "python":
+                    suggestion = "Use parameterized queries with cursor.execute(query, params) instead."
+                elif language == "php":
+                    suggestion = "Use prepared statements with PDO or mysqli_prepare() instead."
+                    
+            elif "XSS risk" in description:
+                if language == "javascript":
+                    suggestion = "Use textContent instead of innerHTML or document.write."
+                elif language == "php":
+                    suggestion = "Use htmlspecialchars() to encode output."
+                    
+            elif "command injection" in description:
+                suggestion = "Avoid executing system commands with user input. Consider safer alternatives."
+                
+            elif "Insecure deserialization" in description:
+                if language == "python":
+                    suggestion = "Use yaml.safe_load() instead of yaml.load() or consider JSON."
+                    
+            suggested_fixes[line] = f"{suggestion} - {context}"
+            
+        return suggested_fixes
+
+
+class LilithAssistant:
+    """Main assistant class integrating all components"""
+    
+    def __init__(self, verbose: bool = False):
+        self.core = LilithCore(verbose=verbose)
+        self.network = NetworkAnalyzer(self.core)
+        self.password = PasswordTools(self.core)
+        self.code = CodeAnalyzer(self.core)
+        
+        self.core.log("Lilith Assistant initialized", "INFO")
+        
+    def help(self) -> str:
+        """Display help message with available commands"""
+        help_text = f"""
+{BANNER}
+
+Available Commands:
+------------------
+
+Network:
+  scan-port HOST PORT       - Check if specific port is open
+  scan-common HOST          - Scan common ports on host
+
+Password:
+  analyze-password PASSWORD - Analyze password strength
+  generate-password [LENGTH]- Generate secure password
+
+Code:
+  analyze-code FILE LANG    - Analyze code for security issues
+  
+Utilities:
+  hash STRING [ALGORITHM]   - Generate hash (sha256, md5, sha1, sha512)
+  encode-base64 STRING      - Encode string to base64
+  decode-base64 STRING      - Decode base64 to string
+  
+System:
+  help                      - Show this help message
+  version                   - Show version information
+  exit                      - Exit the assistant
+  
+Usage examples:
+  lilith scan-port example.com 443
+  lilith analyze-password MyP@ssw0rd123
+  lilith analyze-code myfile.py python
+        """
+        return help_text
+        
+    def parse_args(self):
+        """Parse command line arguments"""
+        parser = argparse.ArgumentParser(
+            description="Lilith - Security Analysis Assistant",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="For educational purposes only."
+        )
+        
+        subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+        
+        # Network commands
+        scan_port_parser = subparsers.add_parser("scan-port", help="Check if specific port is open")
+        scan_port_parser.add_argument("host", help="Target hostname or IP")
+        scan_port_parser.add_argument("port", type=int, help="Port number to scan")
+        
+        scan_common_parser = subparsers.add_parser("scan-common", help="Scan common ports on host")
+        scan_common_parser.add_argument("host", help="Target hostname or IP")
+        
+        # Password commands
+        analyze_pass_parser = subparsers.add_parser("analyze-password", help="Analyze password strength")
+        analyze_pass_parser.add_argument("password", help="Password to analyze")
+        
+        generate_pass_parser = subparsers.add_parser("generate-password", help="Generate secure password")
+        generate_pass_parser.add_argument("length", type=int, nargs="?", default=16, help="Password length")
+        
+        # Code analysis
+        analyze_code_parser = subparsers.add_parser("analyze-code", help="Analyze code for security issues")
+        analyze_code_parser.add_argument("file", help="File to analyze")
+        analyze_code_parser.add_argument("language", help="Programming language (python, javascript, php)")
+        
+        # Utility commands
+        hash_parser = subparsers.add_parser("hash", help="Generate hash of string")
+        hash_parser.add_argument("string", help="String to hash")
+        hash_parser.add_argument("algorithm", nargs="?", default="sha256", 
+                               help="Hash algorithm (md5, sha1, sha256, sha512)")
+        
+        encode_b64_parser = subparsers.add_parser("encode-base64", help="Encode string to base64")
+        encode_b64_parser.add_argument("string", help="String to encode")
+        
+        decode_b64_parser = subparsers.add_parser("decode-base64", help="Decode base64 to string")
+        decode_b64_parser.add_argument("string", help="Base64 string to decode")
+        
+        # System commands
+        subparsers.add_parser("help", help="Show help message")
+        subparsers.add_parser("version", help="Show version information")
+        
+        # Add verbose flag globally
+        parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+        
+        return parser.parse_args()
+        
+    def handle_command(self, args):
+        """Handle the specified command"""
+        if args.verbose:
+            self.core.verbose = True
+            
+        if args.command == "help" or args.command is None:
+            print(self.help())
+            return
+            
+        elif args.command == "version":
+            print(f"Lilith Security Analysis Assistant v{VERSION}")
+            return
+            
+        elif args.command == "scan-port":
+            result = self.network.scan_port(args.host, args.port)
+            status = "open" if result else "closed"
+            print(f"Port {args.port} on {args.host} is {status}")
+            
+        elif args.command == "scan-common":
+            results = self.network.scan_common_ports(args.host)
+          
